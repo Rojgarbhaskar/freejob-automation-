@@ -1,28 +1,38 @@
 #!/bin/bash
 set -euo pipefail
 
-echo "Starting multi-site scraper -> WP autopost..."
+echo "========================================"
+echo "RojgarBhaskar Auto-Poster Starting..."
+echo "========================================"
 
-# Required envs (set as GitHub repository secrets or Actions secrets)
-: "${WP_SITE_URL:?Need WP_SITE_URL env (e.g. https://rojgarbhaskar.com)}"
-: "${WP_USERNAME:?Need WP_USERNAME env}"
-: "${WP_APP_PASSWORD:?Need WP_APP_PASSWORD env}"
+# Check required environment variables
+: "${WP_SITE_URL:?ERROR: WP_SITE_URL not set}"
+: "${WP_USERNAME:?ERROR: WP_USERNAME not set}"
+: "${WP_APP_PASSWORD:?ERROR: WP_APP_PASSWORD not set}"
 
+# Optional variables with defaults
 MAX_ITEMS=${MAX_ITEMS:-10}
 SLEEP_BETWEEN_POSTS=${SLEEP_BETWEEN_POSTS:-3}
 
-echo "WP_SITE_URL: ***"
-echo "MAX_ITEMS: ${MAX_ITEMS}"
-echo "SLEEP_BETWEEN_POSTS: ${SLEEP_BETWEEN_POSTS}"
+echo "Config:"
+echo "  - WP Site: [HIDDEN]"
+echo "  - Max Items: ${MAX_ITEMS}"
+echo "  - Sleep Between Posts: ${SLEEP_BETWEEN_POSTS}s"
 
-# Ensure python + pip are available
-if ! python3 -c "import bs4,requests" >/dev/null 2>&1; then
-  echo "Installing python dependencies..."
-  python3 -m pip install --user --upgrade pip >/dev/null
-  python3 -m pip install --user requests beautifulsoup4 lxml >/dev/null
-fi
+# Install Python dependencies
+echo ""
+echo "Installing dependencies..."
+python3 -m pip install --upgrade pip --quiet
+python3 -m pip install requests beautifulsoup4 --quiet
 
-# Run scraper
+echo "Dependencies installed."
+echo ""
+
+# Run the scraper
+echo "Running scraper..."
 python3 scripts/scraper.py
 
-echo "Script Completed."
+echo ""
+echo "========================================"
+echo "Script Completed!"
+echo "========================================"
