@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RojgarBhaskar Scraper - WORKING VERSION
-Tested websites that don't block bots
+RojgarBhaskar Scraper - FIXED VERSION
+- Proper job title extraction (not "Get Details")
+- Correct category assignment
+- No footer social links
+- Sources: FreeJobAlert, SarkariNaukri, FreshersLive, SarkariResult.com.cm
 """
 
 import os
@@ -23,7 +26,7 @@ USER_AGENTS = [
 
 TIMEOUT = 20
 
-# ---- Category IDs (RojgarBhaskar) ----
+# ---- RojgarBhaskar Category IDs ----
 CATEGORIES = {
     "latest_jobs": 18,
     "results": 19,
@@ -34,16 +37,13 @@ CATEGORIES = {
 }
 
 CATEGORY_KEYWORDS = {
-    20: ["admit card", "admit", "hall ticket", "call letter"],
-    19: ["result", "merit list", "cut off", "score card"],
+    20: ["admit card", "admit", "hall ticket", "call letter", "e-admit"],
+    19: ["result", "merit list", "cut off", "cutoff", "score card", "scorecard", "merit"],
     21: ["answer key", "answer sheet", "objection"],
     22: ["syllabus", "exam pattern"],
-    23: ["admission", "counselling", "counseling"],
-    18: ["recruitment", "vacancy", "bharti", "jobs", "notification", "apply", "online form"]
+    23: ["admission", "counselling", "counseling", "seat allotment"],
+    18: ["recruitment", "vacancy", "bharti", "jobs", "notification", "apply", "online form", "post"]
 }
-
-BLOCKED_DOMAINS = ["sarkariexam.com", "rojgarlive.com", "naukri.com"]
-# Note: FreeJobAlert links allowed in scraping but filtered in output
 
 # ---- Utility ----
 def log(msg):
@@ -61,11 +61,11 @@ def get_headers():
 def fetch(url):
     try:
         log(f"Fetching: {url}")
-        time.sleep(random.uniform(1, 2))  # Random delay
+        time.sleep(random.uniform(0.5, 1.5))
         r = requests.get(url, headers=get_headers(), timeout=TIMEOUT)
         r.raise_for_status()
         r.encoding = r.apparent_encoding or 'utf-8'
-        log(f"  → Success: {len(r.text)} bytes")
+        log(f"  → OK ({len(r.text)} bytes)")
         return r.text
     except Exception as e:
         log(f"  → Error: {e}")
@@ -83,8 +83,11 @@ def make_absolute(url, base):
         return url
     return urljoin(base, url)
 
-def is_blocked(url):
-    for d in BLOCKED_DOMAINS:
+def is_aggregator_link(url):
+    """Check if URL is from job aggregator site"""
+    aggregators = ['freejobalert.com', 'sarkariexam.com', 'rojgarlive.com', 
+                   'sarkarinaukri.com', 'fresherslive.com', 'sarkariresult.com.cm']
+    for d in aggregators:
         if d in url.lower():
             return True
     return False
@@ -121,120 +124,88 @@ def wp_post(site, user, pwd, title, content, cat_id):
         log(f"WP Exception: {e}")
     return None
 
-# ---- WORKING SCRAPERS ----
+# ========== SCRAPERS ==========
 
 def scrape_freejobalert():
     """
-    FreeJobAlert.com Scraper
-    Step 1: Get job links from latest-notifications page
-    Step 2: Visit each "Get Details" link to get actual job page
+    FreeJobAlert Scraper - Get actual job titles, not "Get Details"
     """
     items = []
     base = "https://www.freejobalert.com"
     url = f"{base}/latest-notifications/"
     
-    log("FreeJobAlert: Fetching main page...")
+    log("FreeJobAlert: Fetching...")
     html = fetch(url)
     if not html:
-        log("FreeJobAlert: Failed to fetch main page")
         return items
     
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Find all job links - they are in table rows
-    # Structure: Table with job title and "Get Details" link
-    detail_links = []
+    # FreeJobAlert structure: Tables with job listings
+    # Each row has: Date | Job Title (with link) | Post Info
     
-    # Method 1: Find links in tables
     for table in soup.find_all('table'):
-        for row in table.find_all('tr'):
-            for a in row.find_all('a', href=True):
-                href = a.get('href', '')
-                text = clean(a.get_text())
-                
-                # Skip if too short or navigation link
-                if not text or len(text) < 10:
-                    continue
-                if any(skip in text.lower() for skip in ['view more', 'click here', 'home', 'about']):
-                    continue
-                
-                # Check if it's a job detail page link
-                if 'freejobalert.com' in href and '/latest-notifications/' not in href:
-                    # This is likely a "Get Details" link
-                    full_url = make_absolute(href, base)
-                    detail_links.append((text, full_url))
+        rows = table.find_all('tr')
+        for row in rows:
+            cells = row.find_all('td')
+            
+            # Look for cells with job links
+            for cell in cells:
+                links = cell.find_all('a', href=True)
+                for a in links:
+                    href = a.get('href', '')
+                    text = clean(a.get_text())
+                    
+                    # Skip navigation/category links
+                    if not text or len(text) < 15:
+                        continue
+                    if any(skip in text.lower() for skip in ['view all', 'click here', 'read more', 'get details']):
+                        continue
+                    if any(skip in href for skip in ['/category/', '/tag/', '/page/', '/author/', '/latest-notifications/']):
+                        continue
+                    
+                    # Valid job detail link
+                    if 'freejobalert.com' in href:
+                        full_url = make_absolute(href, base)
+                        items.append((text, full_url))
     
-    # Method 2: Find links with specific patterns
-    if not detail_links:
+    # Also check for links outside tables
+    if len(items) < 5:
         for a in soup.find_all('a', href=True):
             href = a.get('href', '')
             text = clean(a.get_text())
             
-            if not text or len(text) < 15:
+            if not text or len(text) < 20:
                 continue
-            
-            # Job detail pages usually have organization name in URL
-            if 'freejobalert.com' in href:
-                # Skip category/tag pages
-                if any(skip in href for skip in ['/category/', '/tag/', '/page/', '/author/']):
-                    continue
-                if href != url and '/latest-notifications/' not in href:
+            if 'recruitment' in text.lower() or 'vacancy' in text.lower() or 'notification' in text.lower():
+                if 'freejobalert.com' in href and '/latest-notifications/' not in href:
                     full_url = make_absolute(href, base)
-                    detail_links.append((text, full_url))
+                    items.append((text, full_url))
     
     # Deduplicate
     seen = set()
-    unique_links = []
-    for title, link in detail_links:
-        if link not in seen:
-            seen.add(link)
-            unique_links.append((title, link))
+    unique = []
+    for t, l in items:
+        if l not in seen and len(t) > 15:
+            seen.add(l)
+            unique.append((t, l))
     
-    log(f"FreeJobAlert: Found {len(unique_links)} detail page links")
-    
-    # Now fetch each detail page to get actual job info
-    for title, detail_url in unique_links[:15]:  # Limit to 15
-        try:
-            log(f"  Fetching detail: {title[:40]}...")
-            items.append((title, detail_url))
-        except Exception as e:
-            log(f"  Error: {e}")
-    
-    log(f"FreeJobAlert: Total {len(items)} items")
-    return items
+    log(f"FreeJobAlert: {len(unique)} items")
+    return unique[:15]
 
 
-def scrape_ncs_gov():
-    """National Career Service - Government Portal (Always works)"""
+def scrape_sarkariresult_cm():
+    """
+    SarkariResult.com.cm Scraper
+    """
     items = []
-    url = "https://www.ncs.gov.in/job-seeker/Pages/Search.aspx"
+    base = "https://www.sarkariresult.com.cm"
     
-    # NCS has API-like search
-    api_url = "https://www.ncs.gov.in/api/aggregator/search/jobs"
-    
-    try:
-        # Try direct page scraping
-        html = fetch("https://www.ncs.gov.in/job-seeker/Pages/Government.aspx")
-        if html:
-            soup = BeautifulSoup(html, 'html.parser')
-            for a in soup.find_all('a', href=True):
-                text = clean(a.get_text())
-                href = a.get('href', '')
-                if text and len(text) > 15 and ('job' in href.lower() or 'career' in href.lower()):
-                    full = make_absolute(href, "https://www.ncs.gov.in")
-                    items.append((text, full))
-    except Exception as e:
-        log(f"NCS error: {e}")
-    
-    log(f"NCS Gov: {len(items)} items")
-    return items[:10]
-
-def scrape_employment_news():
-    """Employment News - Government of India"""
-    items = []
-    base = "https://www.employmentnews.gov.in"
-    
+    log("SarkariResult.cm: Fetching...")
     html = fetch(base)
+    if not html:
+        # Try with trailing slash
+        html = fetch(base + "/")
     if not html:
         return items
     
@@ -242,19 +213,24 @@ def scrape_employment_news():
     
     # Find job links
     for a in soup.find_all('a', href=True):
-        text = clean(a.get_text())
         href = a.get('href', '')
+        text = clean(a.get_text())
         
-        if not text or len(text) < 10:
+        if not text or len(text) < 15:
             continue
         
-        # Job related
-        keywords = ['recruitment', 'vacancy', 'jobs', 'walk-in', 'admit', 'result', 'notification']
-        if any(kw in text.lower() for kw in keywords):
-            full = make_absolute(href, base)
-            if 'employmentnews.gov.in' in full or full.startswith(base):
-                items.append((text, full))
+        # Skip navigation
+        skip_words = ['home', 'about', 'contact', 'privacy', 'disclaimer', 'view more', 'read more']
+        if any(skip in text.lower() for skip in skip_words):
+            continue
+        
+        # Job related content
+        job_keywords = ['recruitment', 'vacancy', 'admit', 'result', 'notification', 'apply', 'online form', 'bharti']
+        if any(kw in text.lower() for kw in job_keywords):
+            full_url = make_absolute(href, base)
+            items.append((text, full_url))
     
+    # Deduplicate
     seen = set()
     unique = []
     for t, l in items:
@@ -262,24 +238,25 @@ def scrape_employment_news():
             seen.add(l)
             unique.append((t, l))
     
-    log(f"Employment News: {len(unique)} items")
-    return unique[:10]
+    log(f"SarkariResult.cm: {len(unique)} items")
+    return unique[:15]
+
 
 def scrape_sarkarinaukri():
-    """SarkariNaukri.com - Usually accessible"""
+    """SarkariNaukri.com Scraper"""
     items = []
     base = "https://www.sarkarinaukri.com"
     
+    log("SarkariNaukri: Fetching...")
     html = fetch(base)
     if not html:
         return items
     
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Find job boxes/links
     for a in soup.find_all('a', href=True):
-        text = clean(a.get_text())
         href = a.get('href', '')
+        text = clean(a.get_text())
         
         if not text or len(text) < 15:
             continue
@@ -288,11 +265,8 @@ def scrape_sarkarinaukri():
         if any(s in text.lower() for s in skip):
             continue
         
-        if 'sarkarinaukri.com' in href and '/post/' in href:
+        if 'sarkarinaukri.com' in href:
             items.append((text, href))
-        elif href.startswith('/') and len(text) > 20:
-            full = make_absolute(href, base)
-            items.append((text, full))
     
     seen = set()
     unique = []
@@ -304,12 +278,14 @@ def scrape_sarkarinaukri():
     log(f"SarkariNaukri: {len(unique)} items")
     return unique[:10]
 
+
 def scrape_fresherslive():
-    """FreshersLive - Government Jobs Section"""
+    """FreshersLive Scraper"""
     items = []
     base = "https://www.fresherslive.com"
     url = f"{base}/government-jobs"
     
+    log("FreshersLive: Fetching...")
     html = fetch(url)
     if not html:
         html = fetch(base)
@@ -319,14 +295,14 @@ def scrape_fresherslive():
     soup = BeautifulSoup(html, 'html.parser')
     
     for a in soup.find_all('a', href=True):
-        text = clean(a.get_text())
         href = a.get('href', '')
+        text = clean(a.get_text())
         
         if not text or len(text) < 15:
             continue
         
         if 'fresherslive.com' in href:
-            if '/government-jobs/' in href or '/central-govt-jobs/' in href or '/state-govt-jobs/' in href:
+            if '/government-jobs/' in href or '/central-govt-jobs/' in href:
                 items.append((text, href))
     
     seen = set()
@@ -339,37 +315,37 @@ def scrape_fresherslive():
     log(f"FreshersLive: {len(unique)} items")
     return unique[:10]
 
-def scrape_hirelateral():
-    """HireLateral - Job Portal"""
-    items = []
-    base = "https://www.hirelateral.com"
-    url = f"{base}/government-jobs"
-    
-    html = fetch(url)
-    if not html:
-        return items
-    
-    soup = BeautifulSoup(html, 'html.parser')
-    
-    for a in soup.find_all('a', href=True):
-        text = clean(a.get_text())
-        href = a.get('href', '')
-        
-        if text and len(text) > 15 and 'hirelateral.com' in href:
-            if '/job/' in href or '/government' in href:
-                items.append((text, href))
-    
-    seen = set()
-    unique = []
-    for t, l in items:
-        if l not in seen:
-            seen.add(l)
-            unique.append((t, l))
-    
-    log(f"HireLateral: {len(unique)} items")
-    return unique[:10]
 
-# ---- Content Builder ----
+# ========== CONTENT EXTRACTION ==========
+
+def extract_job_title_from_page(soup, fallback_title):
+    """Extract actual job title from detail page"""
+    
+    # Method 1: Look for H1/H2 with job-related content
+    for tag in ['h1', 'h2']:
+        for heading in soup.find_all(tag):
+            text = clean(heading.get_text())
+            if len(text) > 20 and len(text) < 200:
+                # Check if it looks like a job title
+                if any(kw in text.lower() for kw in ['recruitment', 'vacancy', 'notification', 'admit', 'result', 'apply']):
+                    return text
+    
+    # Method 2: Page title
+    if soup.title:
+        title = clean(soup.title.string)
+        # Remove site name from title
+        for remove in ['- FreeJobAlert', '- Sarkari Result', '| FreshersLive', '- SarkariNaukri']:
+            title = title.replace(remove, '').strip()
+        if len(title) > 20:
+            return title
+    
+    # Method 3: Meta title
+    meta_title = soup.find('meta', {'property': 'og:title'})
+    if meta_title and meta_title.get('content'):
+        return clean(meta_title.get('content'))
+    
+    return fallback_title
+
 
 def extract_details(soup):
     """Extract job details from page"""
@@ -382,47 +358,46 @@ def extract_details(soup):
                 label = clean(cells[0].get_text()).lower()
                 value = clean(cells[1].get_text())
                 
-                if not value or len(value) < 2:
+                if not value or len(value) < 2 or value.lower() in ['na', 'n/a', '-']:
                     continue
                 
-                if any(k in label for k in ['organization', 'department', 'company', 'board']):
+                if any(k in label for k in ['organization', 'department', 'company', 'board', 'संस्था', 'विभाग']):
                     details['org'] = value
-                elif any(k in label for k in ['post', 'position', 'job title']):
+                elif any(k in label for k in ['post name', 'position', 'job title', 'पद']):
                     details['post'] = value
-                elif any(k in label for k in ['qualification', 'education', 'eligibility']):
+                elif any(k in label for k in ['qualification', 'education', 'eligibility', 'योग्यता']):
                     details['qual'] = value
-                elif any(k in label for k in ['vacancy', 'total post', 'no of post']):
+                elif any(k in label for k in ['vacancy', 'total post', 'no of post', 'रिक्ति']):
                     details['vacancy'] = value
-                elif any(k in label for k in ['last date', 'closing date', 'apply before']):
+                elif any(k in label for k in ['last date', 'closing date', 'अंतिम']):
                     details['last_date'] = value
-                elif any(k in label for k in ['salary', 'pay scale', 'pay band']):
+                elif any(k in label for k in ['salary', 'pay scale', 'वेतन']):
                     details['salary'] = value
-                elif any(k in label for k in ['age', 'age limit']):
+                elif any(k in label for k in ['age', 'age limit', 'आयु']):
                     details['age'] = value
-                elif any(k in label for k in ['fee', 'application fee']):
+                elif any(k in label for k in ['fee', 'application fee', 'शुल्क']):
                     details['fee'] = value
     
     return details
 
-def extract_links(soup, source):
-    """Extract official links only - NO aggregator site links in output"""
+
+def extract_official_links(soup):
+    """Extract only official/government links - NO aggregator links"""
     links = {"apply": None, "notification": None, "official": None}
-    
-    # Domains to exclude from Important Links output
-    excluded_in_output = ['fresherslive', 'sarkarinaukri', 'hirelateral', 'employmentnews', 'freejobalert.com']
     
     for a in soup.find_all('a', href=True):
         href = a.get('href', '')
         text = clean(a.get_text()).lower()
         
-        if not href.startswith('http') or is_blocked(href):
+        if not href.startswith('http'):
             continue
         
-        # Skip aggregator site links in output
-        if any(d in href.lower() for d in excluded_in_output):
+        # Skip aggregator site links
+        if is_aggregator_link(href):
             continue
         
-        if ('apply' in text or 'registration' in text) and not links['apply']:
+        # Only official govt/org links
+        if ('apply' in text or 'registration' in text or 'online' in text) and not links['apply']:
             links['apply'] = href
         elif ('notification' in text or 'pdf' in text or 'download' in text) and not links['notification']:
             links['notification'] = href
@@ -431,41 +406,48 @@ def extract_links(soup, source):
     
     return links
 
+
 def extract_faq(soup):
-    """Extract FAQ if present"""
+    """Extract FAQ section if present"""
     faqs = []
     
-    # Find FAQ section
+    # Look for FAQ heading
     for heading in soup.find_all(['h2', 'h3', 'h4']):
-        if 'faq' in heading.get_text().lower() or 'question' in heading.get_text().lower():
+        heading_text = heading.get_text().lower()
+        if 'faq' in heading_text or 'frequently' in heading_text or 'question' in heading_text:
+            # Get following content
             sibling = heading.find_next_sibling()
-            while sibling and sibling.name not in ['h2', 'h3']:
+            count = 0
+            while sibling and count < 10:
+                if sibling.name in ['h2', 'h3']:
+                    break
                 text = clean(sibling.get_text())
-                if text and len(text) > 20:
+                if text and len(text) > 30:
                     faqs.append(text)
                 sibling = sibling.find_next_sibling()
-                if len(faqs) >= 5:
-                    break
+                count += 1
     
-    return faqs
+    return faqs[:5]
+
+
+# ========== CONTENT BUILDER - NO FOOTER SOCIAL ==========
 
 def build_content(title, link):
-    """Build SarkariResult style content"""
+    """Build SarkariResult style content - NO FOOTER SOCIAL LINKS"""
     
     html = fetch(link)
     
     if not html:
-        return build_simple_content(title, link)
+        return build_simple_content(title)
     
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Get title
-    page_title = clean(soup.title.string) if soup.title else title
-    final_title = page_title if len(page_title) > 10 else title
+    # Get ACTUAL job title from page
+    actual_title = extract_job_title_from_page(soup, title)
     
     # Extract data
     details = extract_details(soup)
-    links = extract_links(soup, link)
+    links = extract_official_links(soup)
     faqs = extract_faq(soup)
     
     # Get excerpt
@@ -476,13 +458,13 @@ def build_content(title, link):
             excerpt = t
             break
     
-    # Build HTML
+    # Build HTML - NO FOOTER SOCIAL LINKS
     content = f'''
-<div style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;">
+<div style="font-family:Arial,sans-serif;max-width:900px;margin:0 auto;">
 
 <!-- Header -->
 <div style="background:linear-gradient(135deg,#c62828,#8e0000);color:#fff;padding:25px;border-radius:10px 10px 0 0;text-align:center;">
-<h1 style="margin:0;font-size:24px;line-height:1.4;">{final_title}</h1>
+<h1 style="margin:0;font-size:22px;line-height:1.4;">{actual_title}</h1>
 <p style="margin:10px 0 0;opacity:0.9;font-size:14px;">📢 RojgarBhaskar.com - Sarkari Naukri Portal</p>
 </div>
 
@@ -532,8 +514,7 @@ def build_content(title, link):
         content += f'''
 <tr style="background:#fff;"><td style="padding:12px;text-align:center;border:1px solid #eee;"><strong>Official Website</strong></td><td style="padding:12px;text-align:center;border:1px solid #eee;"><a href="{links['official']}" target="_blank" style="background:#ff9800;color:#fff;padding:8px 20px;border-radius:5px;text-decoration:none;">Visit</a></td></tr>'''
     
-    content += f'''
-<tr style="background:#fafafa;"><td style="padding:12px;text-align:center;border:1px solid #eee;"><strong>Full Details</strong></td><td style="padding:12px;text-align:center;border:1px solid #eee;"><a href="{link}" target="_blank" style="background:#9c27b0;color:#fff;padding:8px 20px;border-radius:5px;text-decoration:none;">View Source</a></td></tr>
+    content += '''
 </table>
 </div>'''
 
@@ -542,49 +523,40 @@ def build_content(title, link):
         content += '''
 <div style="padding:20px;background:#fff;">
 <h2 style="color:#c62828;border-bottom:3px solid #c62828;padding-bottom:10px;font-size:18px;">❓ FAQ / अक्सर पूछे जाने वाले प्रश्न</h2>'''
-        for faq in faqs:
+        for i, faq in enumerate(faqs, 1):
             content += f'''
-<div style="background:#f5f5f5;padding:15px;margin:10px 0;border-left:4px solid #c62828;border-radius:0 8px 8px 0;">{faq}</div>'''
+<div style="background:#f5f5f5;padding:15px;margin:10px 0;border-left:4px solid #c62828;border-radius:0 8px 8px 0;">{i}. {faq}</div>'''
         content += '</div>'
 
-    # Follow Section
+    # Close main div - NO FOOTER SOCIAL
     content += '''
-<div style="background:linear-gradient(135deg,#fff5f5,#fff);border:2px solid #c62828;border-radius:0 0 10px 10px;padding:25px;text-align:center;">
-<h3 style="color:#c62828;margin:0 0 15px;">🔔 RojgarBhaskar को Follow करें!</h3>
-<p style="margin:0;">
-<a href="https://whatsapp.com/channel/0029VbB4TL0DuMRYJlLPQN47" target="_blank" style="display:inline-block;background:#25d366;color:#fff;padding:10px 20px;border-radius:5px;margin:5px;text-decoration:none;">📱 WhatsApp</a>
-<a href="https://t.me/+gjQIJRUl1a8wYzM1" target="_blank" style="display:inline-block;background:#0088cc;color:#fff;padding:10px 20px;border-radius:5px;margin:5px;text-decoration:none;">📢 Telegram</a>
-<a href="https://www.youtube.com/@Rojgar_bhaskar" target="_blank" style="display:inline-block;background:#ff0000;color:#fff;padding:10px 20px;border-radius:5px;margin:5px;text-decoration:none;">🎥 YouTube</a>
-</p>
-</div>
-
 </div>
 '''
-    return content
+    return content, actual_title
 
-def build_simple_content(title, link):
-    return f'''
-<div style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;">
-<div style="background:#c62828;color:#fff;padding:25px;border-radius:10px 10px 0 0;text-align:center;">
+
+def build_simple_content(title):
+    """Simple content when page fetch fails - NO FOOTER SOCIAL"""
+    content = f'''
+<div style="font-family:Arial,sans-serif;max-width:900px;margin:0 auto;">
+<div style="background:#c62828;color:#fff;padding:25px;border-radius:10px;text-align:center;">
 <h1 style="margin:0;">{title}</h1>
+<p style="margin:10px 0 0;opacity:0.9;">RojgarBhaskar.com - Sarkari Naukri Portal</p>
 </div>
-<div style="padding:30px;text-align:center;">
+<div style="padding:30px;text-align:center;background:#f9f9f9;">
 <p>Latest Government Job Notification</p>
-<a href="{link}" target="_blank" style="display:inline-block;background:#4caf50;color:#fff;padding:15px 40px;border-radius:5px;text-decoration:none;font-size:18px;">📋 View Full Details & Apply</a>
-</div>
-<div style="background:#fff5f5;padding:20px;border-radius:0 0 10px 10px;text-align:center;border:2px solid #c62828;">
-<p><strong>🔔 Follow RojgarBhaskar:</strong></p>
-<a href="https://whatsapp.com/channel/0029VbB4TL0DuMRYJlLPQN47" target="_blank">WhatsApp</a> | 
-<a href="https://t.me/+gjQIJRUl1a8wYzM1" target="_blank">Telegram</a> | 
-<a href="https://www.youtube.com/@Rojgar_bhaskar" target="_blank">YouTube</a>
+<p>नवीनतम सरकारी नौकरी अधिसूचना। पूरी जानकारी के लिए official website देखें।</p>
 </div>
 </div>
 '''
+    return content, title
 
-# ---- Main ----
+
+# ========== MAIN ==========
+
 def main():
     log("=" * 60)
-    log("RojgarBhaskar Scraper - Working Version")
+    log("RojgarBhaskar Scraper - Fixed Version")
     log("=" * 60)
     
     WP_SITE = os.environ.get("WP_SITE_URL", "").strip()
@@ -601,22 +573,21 @@ def main():
     
     all_items = []
     
-    # Try each source
+    # Sources - Only these 4
     sources = [
         ("FreeJobAlert", scrape_freejobalert),
+        ("SarkariResult.cm", scrape_sarkariresult_cm),
         ("SarkariNaukri", scrape_sarkarinaukri),
         ("FreshersLive", scrape_fresherslive),
-        ("EmploymentNews", scrape_employment_news),
-        ("HireLateral", scrape_hirelateral),
     ]
     
     for name, func in sources:
         try:
             items = func()
             all_items.extend(items)
-            log(f"  {name}: {len(items)} items added")
+            log(f"  → {name}: {len(items)} items")
         except Exception as e:
-            log(f"  {name} failed: {e}")
+            log(f"  → {name} failed: {e}")
     
     log(f"Total collected: {len(all_items)}")
     
@@ -632,24 +603,36 @@ def main():
     log(f"Unique items: {len(unique)}")
     
     if not unique:
-        log("No items found! Check if websites are accessible.")
+        log("No items found!")
         return
     
     posted, skipped = 0, 0
     
-    for title, link in unique[:MAX_ITEMS]:
+    for orig_title, link in unique[:MAX_ITEMS]:
         try:
-            log(f"Processing: {title[:40]}...")
+            log(f"Processing: {orig_title[:40]}...")
             
-            if wp_exists(WP_SITE, WP_USER, WP_PASS, title):
-                log("  → Already exists")
+            # Build content and get actual title
+            result = build_content(orig_title, link)
+            content, actual_title = result
+            
+            # Use actual title for posting
+            final_title = actual_title if len(actual_title) > 15 else orig_title
+            
+            log(f"  → Title: {final_title[:50]}")
+            
+            # Check if exists
+            if wp_exists(WP_SITE, WP_USER, WP_PASS, final_title):
+                log("  → Already exists, skipping")
                 skipped += 1
                 continue
             
-            cat = detect_category(title)
-            content = build_content(title, link)
+            # Detect category from title
+            cat = detect_category(final_title)
+            log(f"  → Category ID: {cat}")
             
-            result = wp_post(WP_SITE, WP_USER, WP_PASS, title, content, cat)
+            # Post to WordPress
+            result = wp_post(WP_SITE, WP_USER, WP_PASS, final_title, content, cat)
             
             if result:
                 log(f"  ✅ Posted: {result.get('link', 'OK')}")
