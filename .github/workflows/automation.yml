@@ -17,4 +17,10 @@ jobs:
         run: chmod +x scripts/run.sh
 
       - name: Run script
+        env:
+          WP_SITE_URL: ${{ secrets.WP_SITE_URL }}
+          WP_USERNAME: ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          MAX_ITEMS: "10"
+          SLEEP_BETWEEN_POSTS: "3"
         run: ./scripts/run.sh
