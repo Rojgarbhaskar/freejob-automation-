@@ -1,22 +1,30 @@
-name: freejob-automation
+name: RojgarBhaskar Auto-Poster
 
 on:
+  # Manual trigger
   workflow_dispatch:
+  
+  # Auto run every 30 minutes
   schedule:
-    - cron: "*/30 * * * *"   # Har 30 minute chlega
+    - cron: "*/30 * * * *"
 
 jobs:
-  run-script:
+  scrape-and-post:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Repository checkout
-        uses: actions/checkout@v3
-
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
       - name: Make script executable
         run: chmod +x scripts/run.sh
-
-      - name: Run script
+      
+      - name: Run Scraper
         env:
           WP_SITE_URL: ${{ secrets.WP_SITE_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
