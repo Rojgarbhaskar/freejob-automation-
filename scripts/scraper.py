@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Government Job Auto-Scraper (Single URL Worker + Auto-Post)
-Usage: python scrape.py <SOURCE_URL>
-Output: JSON object with Post Status
+RojgarBhaskar Auto-Scraper (Optimized Original)
+- Bulk Scrapes from FreeJobAlert, SarkariResult, SarkariNaukri, FreshersLive
+- Generates SarkariResult-style HTML (Red/Green/Blue)
+- Auto-Posts to WordPress
+- No Arguments Needed (Runs via GitHub Actions)
 """
 
-import sys
-import json
-import re
 import os
+import sys
+import time
+import re
 import requests
 from bs4 import BeautifulSoup
-import argparse
+from urllib.parse import urljoin, urlparse
+import random
 
 # ---- Config ----
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+]
+
+TIMEOUT = 30
 
 # ---- User's Category IDs ----
 CATEGORIES = {
@@ -27,43 +36,85 @@ CATEGORIES = {
     "admission": 23
 }
 
-# ---- Category Detection Logic ----
-def get_category_id(title):
-    t = title.lower()
-    if any(x in t for x in ["admit card", "hall ticket", "call letter"]):
-        return CATEGORIES["admit_card"], "Admit Card"
-    elif any(x in t for x in ["result", "merit list", "cut off", "score card"]):
-        return CATEGORIES["results"], "Result"
-    elif any(x in t for x in ["syllabus", "exam pattern"]):
-        return CATEGORIES["syllabus"], "Syllabus"
-    elif any(x in t for x in ["answer key", "answer sheet"]):
-        return CATEGORIES["answer_key"], "Answer Key"
-    elif any(x in t for x in ["admission", "counselling"]):
-        return CATEGORIES["admission"], "Admission"
-    else:
-        return CATEGORIES["latest_jobs"], "Latest Jobs"
+# Map internal keys to Category IDs
+CAT_MAP = {
+    'job': 18,
+    'result': 19,
+    'admit': 20,
+    'key': 21,
+    'syllabus': 22,
+    'admission': 23
+}
 
-# ---- WordPress Functions ----
-def wp_post(title, content, cat_id):
-    site = os.environ.get("WP_SITE_URL")
-    user = os.environ.get("WP_USERNAME")
-    pwd = os.environ.get("WP_APP_PASSWORD")
+# ---- Utility ----
+def log(msg):
+    print(f"[LOG] {msg}")
 
-    if not all([site, user, pwd]):
-        return {"error": "Missing WP Credentials"}
+def get_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+    }
 
+def fetch(url):
+    try:
+        log(f"Fetching: {url}")
+        time.sleep(random.uniform(1.0, 2.0))
+        r = requests.get(url, headers=get_headers(), timeout=TIMEOUT)
+        r.raise_for_status()
+        r.encoding = r.apparent_encoding or 'utf-8'
+        return r.text
+    except Exception as e:
+        log(f"  → Error: {e}")
+        return ""
+
+def clean(text):
+    if not text:
+        return ""
+    text = text.replace('\xa0', ' ').replace('&nbsp;', ' ')
+    return re.sub(r'\s+', ' ', text).strip()
+
+def make_absolute(url, base):
+    if not url:
+        return ""
+    if url.startswith(('http://', 'https://')):
+        return url
+    return urljoin(base, url)
+
+def is_aggregator_domain(url):
+    aggregators = [
+        'freejobalert.com', 'sarkariexam.com', 'rojgarlive.com', 
+        'sarkarinaukri.com', 'fresherslive.com', 'sarkariresult.com.cm',
+        'sarkariresult.com', 'jagranjosh.com', 'careerpower.in'
+    ]
+    domain = urlparse(url).netloc.lower()
+    for agg in aggregators:
+        if agg in domain:
+            return True
+    return False
+
+# ---- WordPress ----
+def wp_exists(site, user, pwd, title):
     try:
         url = f"{site.rstrip('/')}/wp-json/wp/v2/posts"
-        
-        # Check if exists first
-        check = requests.get(url, params={"search": title[:30], "per_page": 1}, auth=(user, pwd), timeout=15)
-        if check.status_code == 200 and len(check.json()) > 0:
-            # Check for exact match or close match
-            for p in check.json():
-                if clean_text(p['title']['rendered']).lower() == clean_text(title).lower():
-                    return {"status": "skipped", "reason": "Already exists", "link": p['link']}
+        search_term = title[:30]
+        r = requests.get(url, params={"search": search_term, "per_page": 5}, auth=(user, pwd), timeout=15)
+        if r.status_code == 200:
+            for p in r.json():
+                remote_title = clean(p.get("title", {}).get("rendered", "")).lower()
+                local_title = clean(title).lower()
+                if local_title in remote_title or remote_title in local_title:
+                    return True
+    except:
+        pass
+    return False
 
-        # Post new
+def wp_post(site, user, pwd, title, content, cat_id):
+    try:
+        url = f"{site.rstrip('/')}/wp-json/wp/v2/posts"
         data = {
             "title": title,
             "content": content,
@@ -72,212 +123,317 @@ def wp_post(title, content, cat_id):
         }
         r = requests.post(url, json=data, auth=(user, pwd), timeout=30)
         if r.status_code in (200, 201):
-            return {"status": "success", "id": r.json().get('id'), "link": r.json().get('link')}
-        else:
-            return {"status": "failed", "code": r.status_code, "msg": r.text}
-            
+            return r.json()
+        log(f"WP Error: {r.status_code} - {r.text}")
     except Exception as e:
-        return {"status": "error", "msg": str(e)}
+        log(f"WP Exception: {e}")
+    return None
 
-# ---- Cleaning ----
-def clean_text(text):
-    if not text: return ""
-    text = text.replace('\xa0', ' ').replace('&nbsp;', ' ')
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+# ========== SCRAPERS ==========
 
-def clean_html(soup):
-    for tag in soup(['script', 'style', 'iframe', 'noscript', 'header', 'footer', 'nav', 'aside']):
-        tag.decompose()
-    return soup
-
-# ---- Extraction Heuristics ----
-def extract_table_data(soup, keywords):
-    data = []
-    for kw in keywords:
-        elements = soup.find_all(string=re.compile(kw, re.I))
-        for el in elements:
-            parent = el.find_parent(['tr', 'li', 'div'])
-            if parent:
-                if parent.name == 'tr':
-                    cells = parent.find_all(['td', 'th'])
-                    if len(cells) >= 2:
-                        key = clean_text(cells[0].get_text())
-                        val = clean_text(cells[1].get_text())
-                        data.append((key, val))
-                elif parent.name == 'li':
-                    text = clean_text(parent.get_text())
-                    if ':' in text:
-                        parts = text.split(':', 1)
-                        data.append((parts[0].strip(), parts[1].strip()))
-                    else:
-                        data.append((text, ""))
+def scrape_generic(url, base_domain, cat_type):
+    """Generic scraper for list pages"""
+    items = []
+    log(f"Scraping {cat_type} from {url}...")
     
-    unique_data = []
-    seen = set()
-    for k, v in data:
-        if k not in seen and len(k) < 50:
-            seen.add(k)
-            unique_data.append((k, v))
-    return unique_data
-
-def extract_links(soup, base_url):
-    links = []
-    keywords = ['apply', 'notification', 'official', 'download', 'click here', 'login', 'registration', 'admit card', 'result']
-    seen_urls = set()
+    html = fetch(url)
+    if not html: return items
     
-    for a in soup.find_all('a', href=True):
-        text = clean_text(a.get_text()).lower()
-        href = a['href']
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    links = soup.find_all('a', href=True)
+    for a in links:
+        href = a.get('href', '')
+        text = clean(a.get_text())
         
-        if not href.startswith('http'): continue # Skip relative for now or handle if needed
-
-        if any(k in text for k in keywords):
-            if any(x in href for x in ['facebook', 'twitter', 'whatsapp', 'telegram']): continue
+        if len(text) < 5: continue
+        
+        # Domain check
+        if base_domain not in href and not href.startswith('/'): continue
+        
+        # Skip junk
+        if any(x in text.lower() for x in ['click here', 'more info', 'app', 'join', 'privacy', 'contact']):
+            continue
             
-            if href not in seen_urls:
-                label = clean_text(a.get_text())
-                if len(label) < 3: label = "Click Here"
-                links.append((label, href))
-                seen_urls.add(href)
+        full_url = make_absolute(href, url)
+        items.append((text, full_url, cat_type))
+        
+    return items[:15] # Limit per category
+
+def collect_all_items():
+    all_items = []
+    
+    # 1. FreeJobAlert (Specific Categories)
+    fja_sources = [
+        ("https://www.freejobalert.com/latest-notifications/", 'job'),
+        ("https://www.freejobalert.com/admit-card/", 'admit'),
+        ("https://www.freejobalert.com/exam-results/", 'result'),
+        ("https://www.freejobalert.com/answer-key/", 'key'),
+        ("https://www.freejobalert.com/syllabus/", 'syllabus'),
+        ("https://www.freejobalert.com/admission/", 'admission')
+    ]
+    for url, cat in fja_sources:
+        all_items.extend(scrape_generic(url, 'freejobalert.com', cat))
+        
+    # 2. SarkariResult.cm (Homepage Mixed)
+    sr_items = scrape_generic("https://www.sarkariresult.com.cm/", 'sarkariresult.com.cm', 'job')
+    # Try to guess category for mixed items
+    for i, (t, l, c) in enumerate(sr_items):
+        t_lower = t.lower()
+        if 'admit' in t_lower: sr_items[i] = (t, l, 'admit')
+        elif 'result' in t_lower: sr_items[i] = (t, l, 'result')
+        elif 'key' in t_lower: sr_items[i] = (t, l, 'key')
+    all_items.extend(sr_items)
+    
+    # 3. SarkariNaukri
+    all_items.extend(scrape_generic("https://www.sarkarinaukri.com/", 'sarkarinaukri.com', 'job'))
+    
+    # 4. FreshersLive
+    all_items.extend(scrape_generic("https://www.fresherslive.com/government-jobs", 'fresherslive.com', 'job'))
+    
+    return all_items
+
+# ========== EXTRACTION & BUILDER ==========
+
+def extract_dates(soup):
+    dates = []
+    keywords = ['application begin', 'start date', 'last date', 'exam date', 'admit card', 'result available']
+    text_nodes = soup.find_all(string=True)
+    for node in text_nodes:
+        clean_node = clean(node).lower()
+        if any(k in clean_node for k in keywords) and len(clean_node) < 50:
+            parent = node.parent
+            if parent.name in ['td', 'th']:
+                sibling = parent.find_next_sibling('td')
+                if sibling: dates.append(f"<strong>{clean(node)}:</strong> {clean(sibling.get_text())}")
+            else:
+                if re.search(r'\d{1,2}[-/]\d{1,2}[-/]\d{2,4}', clean_node): dates.append(clean_node)
+    return dates[:6]
+
+def extract_fees(soup):
+    fees = []
+    keywords = ['general', 'obc', 'ews', 'sc', 'st', 'ph', 'female']
+    text_nodes = soup.find_all(string=True)
+    for node in text_nodes:
+        clean_node = clean(node).lower()
+        if any(k in clean_node for k in keywords) and ('rs' in clean_node or '₹' in clean_node or '/' in clean_node):
+             if len(clean_node) < 60: fees.append(clean(node))
+    return list(set(fees))[:5]
+
+def extract_age(soup):
+    age = []
+    keywords = ['minimum age', 'maximum age', 'min age', 'max age', 'age limit']
+    text_nodes = soup.find_all(string=True)
+    for node in text_nodes:
+        clean_node = clean(node).lower()
+        if any(k in clean_node for k in keywords):
+            parent = node.parent
+            if parent.name in ['td', 'th']:
+                sibling = parent.find_next_sibling('td')
+                if sibling: age.append(f"<strong>{clean(node)}:</strong> {clean(sibling.get_text())}")
+            elif len(clean_node) < 50: age.append(clean_node)
+    return list(set(age))[:4]
+
+def extract_vacancy(soup):
+    best_table = None
+    max_score = 0
+    for table in soup.find_all('table'):
+        score = 0
+        headers = [clean(th.get_text()).lower() for th in table.find_all(['th', 'td'])]
+        if any('post' in h for h in headers): score += 2
+        if any('total' in h for h in headers): score += 2
+        if any('eligibility' in h or 'qualification' in h for h in headers): score += 2
+        if score > max_score:
+            max_score = score
+            best_table = table
+    if best_table:
+        for tag in best_table.find_all(True): tag.attrs = {}
+        best_table['style'] = "width:100%;border-collapse:collapse;border:1px solid #ccc;margin-top:10px;"
+        for td in best_table.find_all(['td', 'th']):
+            td['style'] = "border:1px solid #ccc;padding:8px;text-align:left;"
+        return str(best_table)
+    return "<p>See Notification for Vacancy Details</p>"
+
+def extract_links(soup, base_url, cat_type):
+    """Smart Link Extraction based on Category"""
+    links = []
+    
+    # Define targets based on category
+    targets = []
+    
+    # Common links
+    targets.append(('Official Website', ['official website', 'official site']))
+    targets.append(('Download Notification', ['notification', 'official pdf', 'advertisement']))
+    
+    # Category specific links
+    if cat_type == 'job':
+        targets.insert(0, ('Apply Online', ['apply online', 'registration', 'login']))
+    elif cat_type == 'admit':
+        targets.insert(0, ('Download Admit Card', ['admit card', 'hall ticket', 'call letter', 'download']))
+    elif cat_type == 'result':
+        targets.insert(0, ('Download Result', ['result', 'merit list', 'score card', 'cutoff']))
+    elif cat_type == 'key':
+        targets.insert(0, ('Download Answer Key', ['answer key', 'solution', 'sheet']))
+    elif cat_type == 'syllabus':
+        targets.insert(0, ('Download Syllabus', ['syllabus', 'pattern', 'pdf']))
+    else:
+        targets.insert(0, ('Click Here', ['click here', 'link', 'apply']))
+
+    found_urls = set()
+    
+    for label, keywords in targets:
+        best_link = None
+        for a in soup.find_all('a', href=True):
+            text = clean(a.get_text()).lower()
+            href = a.get('href', '')
+            full_url = make_absolute(href, base_url)
+            
+            if is_aggregator_domain(full_url): continue
+            
+            if any(k in text for k in keywords):
+                if full_url not in found_urls:
+                    best_link = full_url
+                    break
+        if best_link:
+            links.append((label, best_link))
+            found_urls.add(best_link)
+            
     return links
 
-# ---- HTML Generator ----
-def generate_sarkari_html(title, intro, dates, fees, age, vacancy, eligibility, links):
+def build_content(title, link, cat_type):
+    html = fetch(link)
+    if not html: return None, title
+    
+    soup = BeautifulSoup(html, 'html.parser')
+    h1 = soup.find('h1')
+    actual_title = clean(h1.get_text()) if h1 else title
+    
+    dates = extract_dates(soup)
+    fees = extract_fees(soup)
+    age = extract_age(soup)
+    vacancy_html = extract_vacancy(soup)
+    imp_links = extract_links(soup, link, cat_type)
+    
     RED = "#ab1e1e"
     GREEN = "#008000"
     BLUE = "#000080"
     
-    html = f"""
+    content = f"""
 <div style="font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; border: 2px solid {RED};">
-
-    <!-- Header -->
     <div style="text-align: center; background-color: {RED}; color: white; padding: 15px;">
-        <h1 style="margin: 0; font-size: 22px; font-weight: bold;">{title}</h1>
-        <p style="margin: 8px 0 0; font-size: 14px;">{intro}</p>
+        <h1 style="margin: 0; font-size: 22px; font-weight: bold;">{actual_title}</h1>
+        <p style="margin: 8px 0 0; font-size: 14px; font-weight: bold;">RojgarBhaskar.com : Short Details of Notification</p>
     </div>
-
-    <!-- Dates & Fees -->
-    <table style="width: 100%; border-collapse: collapse;">
+    <table style="width: 100%; border-collapse: collapse; margin-top: 0;">
         <tr>
             <td style="width: 50%; vertical-align: top; border-right: 2px solid {RED}; padding: 0;">
-                <div style="background-color: {RED}; color: white; font-weight: bold; padding: 8px; text-align: center;">Important Dates</div>
-                <div style="padding: 10px;">
-                    <ul style="list-style: none; padding: 0;">
-                        {''.join([f'<li style="margin-bottom: 5px;"><strong>{k}:</strong> {v}</li>' for k, v in dates]) or '<li>Check Notification</li>'}
-                    </ul>
+                <div style="background-color: {RED}; color: white; font-weight: bold; padding: 8px; text-align: center; font-size: 18px;">Important Dates</div>
+                <div style="padding: 15px;">
+                    <ul style="list-style: none; padding: 0; margin: 0;">{''.join([f'<li style="margin-bottom: 8px;">• {d}</li>' for d in dates]) or '<li>• Check Notification</li>'}</ul>
                 </div>
             </td>
             <td style="width: 50%; vertical-align: top; padding: 0;">
-                <div style="background-color: {RED}; color: white; font-weight: bold; padding: 8px; text-align: center;">Application Fee</div>
-                <div style="padding: 10px;">
-                    <ul style="list-style: none; padding: 0;">
-                        {''.join([f'<li style="margin-bottom: 5px;"><strong>{k}:</strong> {v}</li>' for k, v in fees]) or '<li>Check Notification</li>'}
-                    </ul>
+                <div style="background-color: {RED}; color: white; font-weight: bold; padding: 8px; text-align: center; font-size: 18px;">Application Fee</div>
+                <div style="padding: 15px;">
+                    <ul style="list-style: none; padding: 0; margin: 0;">{''.join([f'<li style="margin-bottom: 8px;">• {f}</li>' for f in fees]) or '<li>• Check Notification</li>'}</ul>
                 </div>
             </td>
         </tr>
     </table>
-
-    <!-- Age Limit -->
     <div style="border-top: 2px solid {RED};">
-        <div style="background-color: {GREEN}; color: white; font-weight: bold; padding: 8px; text-align: center;">Age Limit</div>
-        <div style="padding: 10px;">
-            <ul style="list-style: none; padding: 0;">
-                {''.join([f'<li style="margin-bottom: 5px;"><strong>{k}:</strong> {v}</li>' for k, v in age]) or '<li>As per Rules</li>'}
-            </ul>
+        <div style="background-color: {GREEN}; color: white; font-weight: bold; padding: 8px; text-align: center; font-size: 18px;">{actual_title} : Age Limit Details</div>
+        <div style="padding: 15px;">
+            <ul style="list-style: none; padding: 0; margin: 0;">{''.join([f'<li style="margin-bottom: 8px;">• {a}</li>' for a in age]) or '<li>• As per Rules</li>'}</ul>
         </div>
     </div>
-
-    <!-- Vacancy & Eligibility -->
     <div style="border-top: 2px solid {RED};">
-        <div style="background-color: {BLUE}; color: white; font-weight: bold; padding: 8px; text-align: center;">Vacancy & Eligibility Details</div>
-        <div style="padding: 10px;">
-            <table style="width: 100%; border-collapse: collapse; border: 1px solid #ddd;">
-                <tr style="background-color: #f2f2f2;">
-                    <th style="border: 1px solid #ddd; padding: 8px;">Post Name</th>
-                    <th style="border: 1px solid #ddd; padding: 8px;">Total Post</th>
-                    <th style="border: 1px solid #ddd; padding: 8px;">Eligibility</th>
-                </tr>
-                {''.join([f'<tr><td style="border: 1px solid #ddd; padding: 8px;">{k}</td><td style="border: 1px solid #ddd; padding: 8px;">{v}</td><td style="border: 1px solid #ddd; padding: 8px;">Check Notification</td></tr>' for k, v in vacancy]) or '<tr><td colspan="3" style="padding:8px;text-align:center;">Details in Notification</td></tr>'}
-            </table>
-        </div>
+        <div style="background-color: {BLUE}; color: white; font-weight: bold; padding: 8px; text-align: center; font-size: 18px;">Vacancy Details</div>
+        <div style="padding: 15px; overflow-x: auto;">{vacancy_html}</div>
     </div>
-
-    <!-- Important Links -->
     <div style="border-top: 2px solid {RED};">
-        <div style="background-color: {RED}; color: white; font-weight: bold; padding: 8px; text-align: center;">Important Links</div>
-        <div style="padding: 10px;">
+        <div style="background-color: {RED}; color: white; font-weight: bold; padding: 8px; text-align: center; font-size: 18px;">Important Links</div>
+        <div style="padding: 15px;">
             <table style="width: 100%; border-collapse: collapse;">
-                {''.join([f'<tr><td style="padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold;">{l[0]}</td><td style="padding: 8px; border-bottom: 1px solid #ddd; text-align: right;"><a href="{l[1]}" target="_blank" style="background-color: {RED}; color: white; padding: 5px 15px; text-decoration: none; border-radius: 3px;">Click Here</a></td></tr>' for l in links])}
+    """
+    for label, url in imp_links:
+        content += f"""
+                <tr>
+                    <td style="padding: 10px; border-bottom: 1px solid #ddd; font-weight: bold; font-size: 16px;">{label}</td>
+                    <td style="padding: 10px; border-bottom: 1px solid #ddd; text-align: right;">
+                        <a href="{url}" target="_blank" style="background-color: {RED}; color: white; padding: 8px 25px; text-decoration: none; border-radius: 4px; font-weight: bold;">Click Here</a>
+                    </td>
+                </tr>
+        """
+    content += """
             </table>
         </div>
     </div>
-
+    <div style="text-align: center; padding: 15px; border-top: 1px solid #ddd; color: #666; font-size: 13px;">
+        Note: Interested Candidates Can Read the Full Notification Before Apply Online.
+    </div>
 </div>
 """
-    return html
+    return content, actual_title
 
-# ---- Main Scraper ----
-def scrape(url):
-    try:
-        response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'lxml')
-        soup = clean_html(soup)
-        
-        h1 = soup.find('h1')
-        title = clean_text(h1.get_text()) if h1 else clean_text(soup.title.string)
-        
-        intro = ""
-        for p in soup.find_all('p'):
-            text = clean_text(p.get_text())
-            if len(text) > 50:
-                intro = text
-                break
-        
-        dates = extract_table_data(soup, ['date', 'start', 'end', 'last', 'exam'])
-        fees = extract_table_data(soup, ['fee', 'application', 'general', 'obc', 'sc/st'])
-        age = extract_table_data(soup, ['age', 'limit', 'born'])
-        
-        vacancy = []
-        for table in soup.find_all('table'):
-            headers = [clean_text(th.get_text()).lower() for th in table.find_all(['th', 'td'])]
-            if any('post' in h for h in headers) and any('total' in h for h in headers):
-                rows = table.find_all('tr')[1:]
-                for row in rows:
-                    cols = row.find_all('td')
-                    if len(cols) >= 2:
-                        vacancy.append((clean_text(cols[0].get_text()), clean_text(cols[-1].get_text())))
-                break
-        
-        links = extract_links(soup, url)
-        
-        # Determine Category ID
-        cat_id, cat_name = get_category_id(title)
-        
-        post_html = generate_sarkari_html(title, intro, dates, fees, age, vacancy, [], links)
-        prompt = f"Banner for {title}, Government Job, Bold Typography, Blue and Red Theme, Professional News Style, 4k Resolution"
-        
-        # Auto Post
-        post_result = wp_post(title, post_html, cat_id)
-        
-        return {
-            "post_title": title,
-            "post_category": cat_name,
-            "category_id": cat_id,
-            "post_html": post_html,
-            "featured_image_prompt": prompt,
-            "wp_status": post_result
-        }
+# ========== MAIN ==========
 
-    except Exception as e:
-        return {"error": str(e)}
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Scrape a government job URL")
-    parser.add_argument("url", help="The URL to scrape")
-    args = parser.parse_args()
+def main():
+    log("=" * 60)
+    log("RojgarBhaskar Auto-Poster Starting...")
+    log("=" * 60)
     
-    result = scrape(args.url)
-    print(json.dumps(result, indent=4))
+    WP_SITE = os.environ.get("WP_SITE_URL", "").strip()
+    WP_USER = os.environ.get("WP_USERNAME", "").strip()
+    WP_PASS = os.environ.get("WP_APP_PASSWORD", "").strip()
+    MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "10"))
+    SLEEP = int(os.environ.get("SLEEP_BETWEEN_POSTS", "3"))
+    
+    log("Config:")
+    log(f" - WP Site: {WP_SITE}")
+    log(f" - Max Items: {MAX_ITEMS}")
+    log(f" - Sleep Between Posts: {SLEEP}s")
+    
+    if not all([WP_SITE, WP_USER, WP_PASS]):
+        log("ERROR: Missing credentials! Check GitHub Secrets.")
+        sys.exit(1)
+    
+    # 1. Collect
+    all_items = collect_all_items()
+    
+    # 2. Dedupe
+    seen = set()
+    unique = []
+    for t, l, c in all_items:
+        if l not in seen:
+            seen.add(l)
+            unique.append((t, l, c))
+            
+    log(f"Total Unique Items Found: {len(unique)}")
+    
+    # 3. Post
+    posted = 0
+    skipped = 0
+    
+    for title, link, cat_type in unique[:MAX_ITEMS]:
+        try:
+            log(f"Processing [{cat_type}]: {title[:40]}...")
+            
+            if wp_exists(WP_SITE, WP_USER, WP_PASS, title):
+                log("  → Already exists")
+                skipped += 1
+                continue
+                
+            content, actual_title = build_content(title, link, cat_type)
+            if not content: continue
+            
+            if actual_title != title and wp_exists(WP_SITE, WP_USER, WP_PASS, actual_title):
+                log("  → Already exists (Actual Title)")
+                skipped += 1
+                continue
+                
+            cat_id = CAT_MAP.get(cat_type, 18)
+            res = wp_post(WP_SITE, WP_USER, WP_PASS, actual_title, content, cat_id)
+            
+            if res:
+                log(f"  ✅ Posted: {res.get('link')}")
+                posted += 1
