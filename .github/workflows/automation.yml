@@ -4,7 +4,7 @@ on:
   # Manual trigger
   workflow_dispatch:
   
-  # Auto run every 30 minutes
+  # Auto run every 60 minutes
   schedule:
     - cron: "*/30 * * * *"
 
